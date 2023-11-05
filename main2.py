@@ -1,4 +1,3 @@
-%%writefile /kaggle/working/CEM/main2.py
 import os
 import time
 import math
