@@ -120,8 +120,8 @@ class Actor(RLNN):
                         antithetic=self.antithetic, parents=self.parents, 
                         elitism=self.elitism) for state in states]
 
-        tar_actions = np.empty((states.shape[0], self.action_dim))
-        Q_values = np.empty(states.shape[0])
+        tar_actions = np.zeros((states.shape[0], self.action_dim))
+        Q_values = np.zeros(states.shape[0])
 
         for _ in range(iterations):
             es_params = [es.ask(es.pop_size) for es in es_es]
@@ -142,7 +142,7 @@ class Actor(RLNN):
             for idx, es in enumerate(es_es):
                 es.tell(to_numpy(T.squeeze(fitness[idx])), es_params[idx])
 
-                if tar_actions[idx][0] is None:
+                if not tar_actions.all():
                     tar_actions[idx] = es.elite
                     Q_values[idx] = es.elite_score
                 
@@ -359,7 +359,6 @@ if __name__ == "__main__":
     # ES parameters
     parser.add_argument('--pop_size', default=10, type=int)
     parser.add_argument('--elitism', dest="elitism",  action='store_true')
-    parser.add_argument('--n_grad', default=5, type=int)
     parser.add_argument('--sigma_init', default=1e-3, type=float)
     parser.add_argument('--damp', default=1e-3, type=float)
     parser.add_argument('--damp_limit', default=1e-5, type=float)
@@ -369,7 +368,6 @@ if __name__ == "__main__":
     parser.add_argument('--n_episodes', default=1, type=int)
     parser.add_argument('--max_steps', default=1000000, type=int)
     parser.add_argument('--mem_size', default=1000000, type=int)
-    parser.add_argument('--n_noisy', default=0, type=int)
 
     # Testing parameters
     parser.add_argument('--filename', default="", type=str)
@@ -377,8 +375,6 @@ if __name__ == "__main__":
 
     # misc
     parser.add_argument('--output', default='results/', type=str)
-    parser.add_argument('--period', default=5000, type=int)
-    parser.add_argument('--n_eval', default=10, type=int)
     parser.add_argument('--save_all_models',
                         dest="save_all_models", action="store_true")
     parser.add_argument('--debug', dest='debug', action='store_true')
@@ -396,7 +392,6 @@ if __name__ == "__main__":
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
     max_action = int(env.action_space.high[0])
-    print('max_action:', max_action)
 
     # memory
     memory = Memory(args.mem_size, state_dim, action_dim)
