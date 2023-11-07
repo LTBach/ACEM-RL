@@ -95,6 +95,7 @@ class Actor(RLNN):
         self.action_dim = action_dim
         self.max_action = max_action
         self.use_td3 = args.use_td3
+        self.mask = args.mask
 
     def forward(self, x):
         
@@ -151,19 +152,23 @@ class Actor(RLNN):
                     Q_values[idx] = es.elite_score
         
         actor_actions = self(states) 
+        if self.mask:
+            if self.use_td3:
+                with T.no_grad():
+                    Q_values_actor_1, Q_values_actor_2 = critic(states, actor_actions)
+                    Q_values_actor = T.min(Q_values_actor_1, Q_values_actor_2)
+            else:
+                with T.no_grad():
+                    Q_values_actor = critic(states, actor_actions)
+            
+            mask = (to_tensor(Q_values).reshape(-1, 1) > Q_values_actor).repeat(1, self.action_dim)
+
+            # Compute actor loss
+            actor_loss = nn.MSELoss()(actor_actions*mask, to_tensor(tar_actions)*mask)
         
-        if self.use_td3:
-            with T.no_grad():
-                Q_values_actor_1, Q_values_actor_2 = critic(states, actor_actions)
-                Q_values_actor = T.min(Q_values_actor_1, Q_values_actor_2)
         else:
-            with T.no_grad():
-                Q_values_actor = critic(states, actor_actions)
-        
-        mask = (to_tensor(Q_values).reshape(-1, 1) > Q_values_actor).repeat(1, self.action_dim)
-        
-        # Compute actor loss
-        actor_loss = nn.MSELoss()(actor_actions*mask, to_tensor(tar_actions)*mask)
+            # Compute actor loss
+            actor_loss = nn.MSELoss()(actor_actions, to_tensor(tar_actions))
 
         # Optimize the actor
         self.optimizer.zero_grad()
@@ -329,10 +334,15 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     
+    # Model parameters
+    parser.add_argument('--mask', dest='mask', action='store_true')
+
+    # Enviroment parameters
     parser.add_argument('--mode', default='train', type=str)
     parser.add_argument('--env', default='HalfCheetah-v4', type=str)
     parser.add_argument('--start_steps', default=10000, type=int)
 
+    # Deep parameters
     parser.add_argument('--actor_lr', default=0.001, type=float)
     parser.add_argument('--critic_lr', default=0.001, type=float)
     parser.add_argument('--batch_size', default=100, type=int)
