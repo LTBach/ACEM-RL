@@ -30,6 +30,39 @@ if USE_CUDA:
 else:
     FloatTensor = T.FloatTensor
 
+def evaluate(actor, env, n_episodes=1):
+    """
+    Evaluate actor on a given number of runs
+    """
+
+    scores = []
+    
+    for _ in range(n_episodes):
+
+        score = 0
+        obs, _ = env.reset()
+        truncated = False
+        done = False
+
+        while not truncated and not done:
+
+            # get action
+            obs = FloatTensor(obs.reshape(-1))
+            action = actor(obs).cpu().detach().numpy()
+
+            # pass to environment
+            n_obs, reward, done, truncated, _ = env.step(action)
+
+            # update score and observation
+            score += reward
+            obs = n_obs
+        
+        scores.append(score)
+    
+    return np.mean(scores)
+
+
+
 def find_target_action(action_dim, state, critic, sigma_init, damp, damp_limit, 
                        pop_size, antithetic, parents, elitism, use_td3=True, iterations=10):
     es = sepCEM(action_dim, sigma_init=sigma_init, damp=damp, damp_limit=damp_limit, 
@@ -381,12 +414,10 @@ if __name__ == "__main__":
 
     # Testing parameters
     parser.add_argument('--filename', default="", type=str)
-    parser.add_argument('--n_test', default=1, type=int)
+    parser.add_argument('--eval_and_save_per', default=100, type=int)
 
     # misc
     parser.add_argument('--output', default='results/', type=str)
-    parser.add_argument('--save_all_models',
-                        dest="save_all_models", action="store_true")
     parser.add_argument('--debug', dest='debug', action='store_true')
     parser.add_argument('--seed', default=-1, type=int)
     parser.add_argument('--render', dest='render', action='store_true')
@@ -437,27 +468,23 @@ if __name__ == "__main__":
     
     # training
     random = True
-    total_steps = 0
-    actor_steps = 0
-    df = pd.DataFrame(columns=["total_steps", "average_score",
-                               "average_score_rl", "average_score_ea", "best_score"])
+    steps = 0
+    df = pd.DataFrame(columns=["steps", "score"])
 
-    while total_steps < args.max_steps:
+    while steps < args.max_steps:
 
-        steps = 0
         score = 0
-        obs, _ = deepcopy(env.reset())
+        obs, _ = env.reset()
         truncated = False
         done = False
 
         while not done and not truncated:
 
-            if total_steps > args.start_steps:
+            if steps > args.start_steps:
                 
                 # get action
                 obs = FloatTensor(obs.reshape(-1))
                 action = actor(obs).cpu().detach().numpy()
-#                 action = actor(obs).cpu().detach().numpy().flatten()
                 if a_noise is not None:
                     action += a_noise.sample()
                 action = np.clip(action, -max_action, max_action)
@@ -476,7 +503,7 @@ if __name__ == "__main__":
                 memory.add((obs, n_obs, action, reward, done_bool))
 
             # if not warm up stage then update actor, critic
-            if total_steps > args.start_steps:
+            if steps > args.start_steps:
                 # critic update
                 critic.update(memory, args.batch_size, actor_t, critic_t)
 
@@ -484,21 +511,28 @@ if __name__ == "__main__":
                 if steps % args.policy_freq == 0:
                     actor.update(memory, args.batch_size, critic, actor_t)
             
+            # save stuff
+            if steps % args.eval_and_save_per == 0:
+
+                # eval
+                eval_score = evaluate(actor, env)
+            
+                res = {"steps": steps,
+                       "score": eval_score}
+                df = df._append(res, ignore_index=True)
+                print(res)
+                
+                # save log
+                df.to_pickle(os.path.join(args.output, "log.pkl"))
+
+                # save actor
+                actor.save_model(args.output, "actor")
+
+                # save critic
+                critic.save_model(args.output, "critic")
+                
+
             # update score, steps and obsevation
             score += reward
             steps += 1
             obs = n_obs
-            
-            
-            if steps % 100 == 0:
-                print('reward:', reward)
-                print('steps:', steps)
-                print('current_score:', score)    
-
-        # update total_steps
-        total_steps += steps
-
-        print('score:', score)
-        print('total_steps:', total_steps)
-        
-        # save stuff
