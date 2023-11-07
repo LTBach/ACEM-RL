@@ -1,4 +1,6 @@
 import os
+import time
+import math
 import argparse
 import pandas as pd
 import numpy as np
@@ -28,6 +30,39 @@ if USE_CUDA:
 else:
     FloatTensor = T.FloatTensor
 
+def evaluate(actor, env, n_episodes=1):
+    """
+    Evaluate actor on a given number of runs
+    """
+
+    scores = []
+    
+    for _ in range(n_episodes):
+
+        score = 0
+        obs, _ = env.reset()
+        truncated = False
+        done = False
+
+        while not truncated and not done:
+
+            # get action
+            obs = FloatTensor(obs.reshape(-1))
+            action = actor(obs).cpu().detach().numpy()
+
+            # pass to environment
+            n_obs, reward, done, truncated, _ = env.step(action)
+
+            # update score and observation
+            score += reward
+            obs = n_obs
+        
+        scores.append(score)
+    
+    return np.mean(scores)
+
+
+
 def find_target_action(action_dim, state, critic, sigma_init, damp, damp_limit, 
                        pop_size, antithetic, parents, elitism, use_td3=True, iterations=10):
     es = sepCEM(action_dim, sigma_init=sigma_init, damp=damp, damp_limit=damp_limit, 
@@ -51,17 +86,16 @@ def find_target_action(action_dim, state, critic, sigma_init, damp, damp_limit,
                 fitness = critic_t(state.repeat(actions.shape[0], 1), actions)
 
         # Update es
-        es.tell(to_numpy(T.squeeze(fitness)), es_params)
-
+        elite, elite_score = es.tell(to_numpy(T.squeeze(fitness)), es_params)
 
         if target_action is None:
-            target_action = es.elite
-            Q_value = es.elite_score
+            target_action = elite
+            Q_value = elite_score
         
-        elif Q_value <= es.elite_score:
-            target_action = es.elite
-            Q_value = es.elite_score
-
+        elif Q_value <= elite_score:
+            target_action = elite
+            Q_value = elite_score
+            
     return target_action, Q_value
 
 class Actor(RLNN):
@@ -94,6 +128,7 @@ class Actor(RLNN):
         self.action_dim = action_dim
         self.max_action = max_action
         self.use_td3 = args.use_td3
+        self.mask = args.mask
 
     def forward(self, x):
         
@@ -109,36 +144,70 @@ class Actor(RLNN):
 
         return x
 
-    def update(self, memory, batch_size, critic, actor_t):
+    def update(self, memory, batch_size, critic, actor_t, iterations=10):
 
         # Sample replay buffer
         states, _, _, _, _ = memory.sample(batch_size)
 
+        es_es = [sepCEM(self.action_dim, sigma_init=self.sigma_init, damp=self.damp, 
+                        damp_limit=self.damp_limit, pop_size=self.pop_size, 
+                        antithetic=self.antithetic, parents=self.parents, 
+                        elitism=self.elitism) for state in states]
 
-        tar_actions = to_tensor([find_target_action(self.action_dim, state, critic, 
-                                          self.sigma_init, self.damp, self.damp_limit,
-                                          self.pop_size, self.antithetic,self.parents,
-                                          self.elitism, use_td3=self.use_td3)[0]
-                                          for state in states])
+        tar_actions = np.zeros((states.shape[0], self.action_dim))
+        Q_values = np.zeros(states.shape[0])
+
+        for _ in range(iterations):
+            es_params = [es.ask(es.pop_size) for es in es_es]
+            actions = to_tensor(deepcopy(es_params))
+            states_for_es = states.unsqueeze(1).repeat(1, 10, 1)
+
+            # Evaluate action using critic
+            if self.use_td3:
+                with T.no_grad():
+                    critic_1, critic_2 = critic(states_for_es, actions)
+                    fitness= T.min(critic_1, critic_2)
+
+            else:
+                with T.no_grad():
+                    fitness = critic_t(states_for_es, actions)
+
+            # Update es
+            for idx, es in enumerate(es_es):
+                es.tell(to_numpy(T.squeeze(fitness[idx])), es_params[idx])
+
+                if not tar_actions.all():
+                    tar_actions[idx] = es.elite
+                    Q_values[idx] = es.elite_score
+                
+                elif Q_values[idx] <= es.elite_score:
+                    tar_actions[idx] = es.elite
+                    Q_values[idx] = es.elite_score
         
-        # Compute actor loss
-        actor_loss = nn.MSELoss()(self(states), tar_actions)
+        actor_actions = self(states) 
+        if self.mask:
+            if self.use_td3:
+                with T.no_grad():
+                    Q_values_actor_1, Q_values_actor_2 = critic(states, actor_actions)
+                    Q_values_actor = T.min(Q_values_actor_1, Q_values_actor_2)
+            else:
+                with T.no_grad():
+                    Q_values_actor = critic(states, actor_actions)
+            
+            mask = (to_tensor(Q_values).reshape(-1, 1) > Q_values_actor).repeat(1, self.action_dim)
+
+            # Compute actor loss
+            actor_loss = nn.MSELoss()(actor_actions*mask, to_tensor(tar_actions)*mask)
+        
+        else:
+            # Compute actor loss
+            actor_loss = nn.MSELoss()(actor_actions, to_tensor(tar_actions))
 
         # Optimize the actor
         self.optimizer.zero_grad()
         actor_loss.backward()
+#         nn.utils.clip_grad_norm_(self.parameters(), 5)
         self.optimizer.step()
-
-        # # Compute actor loss
-        # if self.use_td3:
-        #     actor_loss = -critic(states, self(states))[0].mean()
-        # else:
-        #     actor_loss = -critic(states, self(states)).mean()
-
-        # # Optimize the actor
-        # self.optimizer.zero_grad()
-        # actor_loss.backward()
-        # self.optimizer.step()
 
         # Update the frozen target models
         for param, target_param in zip(self.parameters(), actor_t.parameters()):
@@ -167,12 +236,12 @@ class Critic(RLNN):
     def forward(self, x, u):
         
         if not self.layer_norm:
-            x = F.leaky_relu(self.l1(T.cat([x, u], 1)))
+            x = F.leaky_relu(self.l1(T.cat([x, u], -1)))
             x = F.leaky_relu(self.l2(x))
             x = self.l3(x)
 
         else:
-            x = F.leaky_relu(self.n1(self.l1(T.cat([x, u], 1))))
+            x = F.leaky_relu(self.n1(self.l1(T.cat([x, u], -1))))
             x = F.leaky_relu(self.n2(self.l2(x)))
             x = self.l3(x)
         
@@ -237,22 +306,22 @@ class CriticTD3(RLNN):
     def forward(self, x, u):
         
         if not self.layer_norm:
-            x1 = F.leaky_relu(self.l1(T.cat([x, u], 1)))
+            x1 = F.leaky_relu(self.l1(T.cat([x, u], -1)))
             x1 = F.leaky_relu(self.l2(x1))
             x1 = self.l3(x1)
 
         else:
-            x1 = F.leaky_relu(self.n1(self.l1(T.cat([x, u], 1))))
+            x1 = F.leaky_relu(self.n1(self.l1(T.cat([x, u], -1))))
             x1 = F.leaky_relu(self.n2(self.l2(x1)))
             x1 = self.l3(x1)
 
         if not self.layer_norm:
-            x2 = F.leaky_relu(self.l4(T.cat([x, u], 1)))
+            x2 = F.leaky_relu(self.l4(T.cat([x, u], -1)))
             x2 = F.leaky_relu(self.l5(x2))
             x2 = self.l6(x2)
 
         else:
-            x2 = F.leaky_relu(self.n4(self.l4(T.cat([x, u], 1))))
+            x2 = F.leaky_relu(self.n4(self.l4(T.cat([x, u], -1))))
             x2 = F.leaky_relu(self.n5(self.l5(x2)))
             x2 = self.l6(x2)
 
@@ -298,10 +367,15 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     
+    # Model parameters
+    parser.add_argument('--mask', dest='mask', action='store_true')
+
+    # Enviroment parameters
     parser.add_argument('--mode', default='train', type=str)
     parser.add_argument('--env', default='HalfCheetah-v4', type=str)
     parser.add_argument('--start_steps', default=10000, type=int)
 
+    # Deep parameters
     parser.add_argument('--actor_lr', default=0.001, type=float)
     parser.add_argument('--critic_lr', default=0.001, type=float)
     parser.add_argument('--batch_size', default=100, type=int)
@@ -328,7 +402,6 @@ if __name__ == "__main__":
     # ES parameters
     parser.add_argument('--pop_size', default=10, type=int)
     parser.add_argument('--elitism', dest="elitism",  action='store_true')
-    parser.add_argument('--n_grad', default=5, type=int)
     parser.add_argument('--sigma_init', default=1e-3, type=float)
     parser.add_argument('--damp', default=1e-3, type=float)
     parser.add_argument('--damp_limit', default=1e-5, type=float)
@@ -338,25 +411,20 @@ if __name__ == "__main__":
     parser.add_argument('--n_episodes', default=1, type=int)
     parser.add_argument('--max_steps', default=1000000, type=int)
     parser.add_argument('--mem_size', default=1000000, type=int)
-    parser.add_argument('--n_noisy', default=0, type=int)
 
     # Testing parameters
     parser.add_argument('--filename', default="", type=str)
-    parser.add_argument('--n_test', default=1, type=int)
+    parser.add_argument('--eval_and_save_per', default=100, type=int)
 
     # misc
     parser.add_argument('--output', default='results/', type=str)
-    parser.add_argument('--period', default=5000, type=int)
-    parser.add_argument('--n_eval', default=10, type=int)
-    parser.add_argument('--save_all_models',
-                        dest="save_all_models", action="store_true")
     parser.add_argument('--debug', dest='debug', action='store_true')
     parser.add_argument('--seed', default=-1, type=int)
     parser.add_argument('--render', dest='render', action='store_true')
 
     args = parser.parse_args()
     args.output = get_output_folder(args.output, args.env)
-    with open(args.output + "/parameters.txt", "w") as file:
+    with open(os.path.join(args.output, "parameters.txt"), "w") as file:
         for key, value in vars(args).items():
             file.write(f"{key} = {value}\n")
     
@@ -400,14 +468,11 @@ if __name__ == "__main__":
     
     # training
     random = True
-    total_steps = 0
-    actor_steps = 0
-    df = pd.DataFrame(columns=["total_steps", "average_score",
-                               "average_score_rl", "average_score_ea", "best_score"])
+    steps = 0
+    df = pd.DataFrame(columns=["steps", "score"])
 
-    while total_steps < args.max_steps:
+    while steps < args.max_steps:
 
-        steps = 0
         score = 0
         obs, _ = env.reset()
         truncated = False
@@ -415,12 +480,19 @@ if __name__ == "__main__":
 
         while not done and not truncated:
 
-            # get action
-            obs = FloatTensor(obs.reshape(-1))
-            action = actor(obs).cpu().detach().numpy().flatten()
-            if a_noise is not None:
-                action += a_noise.sample()
-            action = np.clip(action, -max_action, max_action)
+            if steps > args.start_steps:
+                
+                # get action
+                obs = FloatTensor(obs.reshape(-1))
+                action = actor(obs).cpu().detach().numpy()
+                if a_noise is not None:
+                    action += a_noise.sample()
+                action = np.clip(action, -max_action, max_action)
+                print('action_____:', action)
+            else:
+
+                # get action 
+                action = env.action_space.sample()
 
             # pass action to env
             n_obs, reward, done, truncated, _ = env.step(action)
@@ -431,7 +503,7 @@ if __name__ == "__main__":
                 memory.add((obs, n_obs, action, reward, done_bool))
 
             # if not warm up stage then update actor, critic
-            if total_steps > args.start_steps:
+            if steps > args.start_steps:
                 # critic update
                 critic.update(memory, args.batch_size, actor_t, critic_t)
 
@@ -439,14 +511,28 @@ if __name__ == "__main__":
                 if steps % args.policy_freq == 0:
                     actor.update(memory, args.batch_size, critic, actor_t)
             
+            # save stuff
+            if steps % args.eval_and_save_per == 0:
+
+                # eval
+                eval_score = evaluate(actor, env)
+            
+                res = {"steps": steps,
+                       "score": eval_score}
+                df = df._append(res, ignore_index=True)
+                print(res)
+                
+                # save log
+                df.to_pickle(os.path.join(args.output, "log.pkl"))
+
+                # save actor
+                actor.save_model(args.output, "actor.pt")
+
+                # save critic
+                critic.save_model(args.output, "critic.pt")
+                
+
             # update score, steps and obsevation
             score += reward
             steps += 1
             obs = n_obs
-        
-        # update total_steps
-        total_steps += steps
-
-        print('score:', score)
-        print('total_steps:', total_steps)
-
