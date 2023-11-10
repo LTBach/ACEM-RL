@@ -79,7 +79,7 @@ class RLNN(nn.Module):
         """
         T.save(
             self.state_dict(),
-            f'{output}/{net_name}'
+            f'{output}/{net_name}.pt'
         )
 
 class Actor(RLNN):
@@ -108,7 +108,7 @@ class Actor(RLNN):
             x = F.tanh(self.n2(self.l2(x)))
             x = self.max_action * F.tanh(self.l3(x))
 
-            return x
+        return x
         
 
 class Critic(RLNN):
