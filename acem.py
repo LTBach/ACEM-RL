@@ -40,7 +40,7 @@ def evaluate(actor, env, n_episodes=1):
     for _ in range(n_episodes):
 
         score = 0
-        obs, _ = env.reset()
+        obs, _ = deepcopy(env.reset())
         truncated = False
         done = False
 
@@ -48,7 +48,7 @@ def evaluate(actor, env, n_episodes=1):
 
             # get action
             obs = FloatTensor(obs.reshape(-1))
-            action = actor(obs).cpu().detach().numpy()
+            action = actor(obs).cpu().detach().numpy().flatten()
 
             # pass to environment
             n_obs, reward, done, truncated, _ = env.step(action)
@@ -405,8 +405,7 @@ if __name__ == "__main__":
     parser.add_argument('--sigma_init', default=1e-3, type=float)
     parser.add_argument('--damp', default=1e-3, type=float)
     parser.add_argument('--damp_limit', default=1e-5, type=float)
-    parser.add_argument('--mult_noise', dest='mult_noise', action='store_true')
-
+    
     # Training parameters
     parser.add_argument('--n_episodes', default=1, type=int)
     parser.add_argument('--max_steps', default=1000000, type=int)
@@ -418,8 +417,6 @@ if __name__ == "__main__":
 
     # misc
     parser.add_argument('--output', default='results/', type=str)
-    parser.add_argument('--debug', dest='debug', action='store_true')
-    parser.add_argument('--seed', default=-1, type=int)
     parser.add_argument('--render', dest='render', action='store_true')
 
     args = parser.parse_args()
@@ -432,7 +429,7 @@ if __name__ == "__main__":
     env = gym.make(args.env)
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
-    max_action = int(env.action_space.high[0])
+    max_action = env.action_space.high[0]
 
     # memory
     memory = Memory(args.mem_size, state_dim, action_dim)
@@ -454,11 +451,12 @@ if __name__ == "__main__":
     actor_t.load_state_dict(actor.state_dict())
 
     # action noise
-    if not args.ou_noise:
-        a_noise = GaussianNoise(action_dim, sigma=args.gauss_sigma)
-    else:
+    if args.ou_noise:
         a_noise = OrnsteinUhlenbeckProcess(
             action_dim, mu=args.ou_mu, theta=args.ou_theta, sigma=args.ou_sigma)
+    else:
+        a_noise = GaussianNoise(action_dim, sigma=args.gauss_sigma)
+
     
     if USE_CUDA:
         critic.to(DEVICE)
@@ -481,16 +479,15 @@ if __name__ == "__main__":
         while not done and not truncated:
 
             if steps > args.start_steps:
-                
+        
                 # get action
                 obs = FloatTensor(obs.reshape(-1))
-                action = actor(obs).cpu().detach().numpy()
+                action = actor(obs).cpu().detach().numpy().flatten()
                 if a_noise is not None:
                     action += a_noise.sample()
                 action = np.clip(action, -max_action, max_action)
-                print('action_____:', action)
-            else:
 
+            else:
                 # get action 
                 action = env.action_space.sample()
 
@@ -513,7 +510,6 @@ if __name__ == "__main__":
             
             # save stuff
             if steps % args.eval_and_save_per == 0:
-
                 # eval
                 eval_score = evaluate(actor, env)
             
@@ -526,10 +522,10 @@ if __name__ == "__main__":
                 df.to_pickle(os.path.join(args.output, "log.pkl"))
 
                 # save actor
-                actor.save_model(args.output, "actor.pt")
+                actor.save_model(args.output, "actor")
 
                 # save critic
-                critic.save_model(args.output, "critic.pt")
+                critic.save_model(args.output, "critic")
                 
 
             # update score, steps and obsevation
