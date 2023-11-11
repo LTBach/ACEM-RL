@@ -56,19 +56,24 @@ class TD3(object):
             self.critic = self.critic.to(DEVICE)
             self.critic_t = self.critic_t.to(DEVICE)
 
-        # misc
-        self.steps = 0 
-        self.criterion = nn.MSELoss()
+        # environment
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.max_action = max_action
+
+        # misc
+        self.steps = 0 
+        self.criterion = nn.MSELoss()
         self.memory = memory
+
+        # noise
+        self.noise_clip = args.noise_clip
+        self.policy_noise = args.policy_noise
 
         # hyper-parameters
         self.tau = args.tau
         self.discount = args.discount
         self.batch_size = args.batch_size
-        self.noise_clip = args.noise_clip
         self.policy_freq = args.policy_freq
 
     def select_action(self, state, noise=None):
@@ -83,7 +88,7 @@ class TD3(object):
     
     def train(self, iterations=1):
 
-        for it in tqdm(range(iterations)):
+        for it in range(iterations):
             
             # Sample replay buffer
             state, next_state, action, reward , done \
@@ -93,7 +98,7 @@ class TD3(object):
             noise = np.clip(np.random.normal(0, self.policy_noise, size=(
                 self.batch_size, self.action_dim)), -self.noise_clip, self.noise_clip)
             next_action = self.actor_t(next_state) + FloatTensor(noise)
-            next_action = next_action.clampe(-self.max_action, self.max_action)
+            next_action = next_action.clamp(-self.max_action, self.max_action)
 
             # Q target = reward + discount * min_i(Qi(next_state, pi(next_state)))
             with T.no_grad():
@@ -121,11 +126,6 @@ class TD3(object):
                 Q1, Q2 = self.critic(state, self.actor(state))
                 actor_loss = -Q1.mean()
 
-                # Optimize the actor
-                self.actor_optimizer.zero_grad()
-                actor_loss.backward()
-                self.actor_optimizer.step()
-
                 # Update the actor
                 self.actor_optimizer.zero_grad()
                 actor_loss.backward()
@@ -134,8 +134,7 @@ class TD3(object):
                 # Update the frozen target models
                 for param, target_param in zip(self.critic.parameters(), self.critic_t.parameters()):
                     target_param.data.copy_(
-                        self.tau * param.data.copy_(
-                            self.tau * param.data + (1 - self.tau) * target_param.date))
+                        self.tau * param.data + (1 - self.tau) * target_param.data)
 
                 for param, target_param in zip(self.actor.parameters(), self.actor_t.parameters()):
                     target_param.data.copy_(
@@ -279,10 +278,7 @@ if __name__ == "__main__":
             if steps > args.start_steps:
 
                 # get action
-                action = agent.select_action(obs).cpu().detach().numpy().flatten()
-                if a_noise is not None:
-                    action += a_noise.sample()
-                action = np.clip(action, -max_action, max_action)
+                action = agent.select_action(obs, a_noise)
             
             else:
 
