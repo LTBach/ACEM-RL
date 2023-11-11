@@ -204,7 +204,6 @@ if __name__ == "__main__":
     parser.add_argument('--layer_norm', dest='layer_norm', action='store_true')
 
     # TD3 parameters
-    parser.add_argument('--use_td3', dest='use_td3', action='store_true')
     parser.add_argument('--policy_noise', default=0.2, type=float)
     parser.add_argument('--noise_clip', default=0.5, type=float)
     parser.add_argument('--policy_freq', default=2, type=int)
