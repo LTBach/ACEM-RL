@@ -61,11 +61,12 @@ class RLNN(nn.Module):
         """
         return self.get_params().shape[0]
     
-    def load_model(self, filename, net_name):
+    def load(self, filename, net_name):
         """
         Loads the model
         """
         if filename is None:
+            print("File name is None")
             return
         
         self.load_state_dict(
@@ -73,7 +74,7 @@ class RLNN(nn.Module):
                    map_location=lambda storage, loc: storage)
         )
 
-    def save_model(self, output, net_name):
+    def save(self, output, net_name):
         """
         Saves the model
         """

@@ -9,121 +9,42 @@ import torch.optim as optim
 
 USE_CUDA = T.cuda.is_available()
 
-DEVICE = T.device('cuda:0' if USE_CUDA else 'cpu')
+DEVICE = T.device("cuda:0" if USE_CUDA else "cpu")
 
 if USE_CUDA:
     FloatTensor = T.cuda.FloatTensor
 else:
     FloatTensor = T.FloatTensor
-
+    
 class Memory(object):
+    def __init__(self, state_dim, action_dim, max_size=int(1e6)):
+        self.max_size = max_size
+        self.ptr = 0
+        self.size = 0
 
-    def __init__(self, memory_size, state_dim, action_dim):
+        self.states = T.zeros(max_size, state_dim, device=DEVICE)
+        self.actions = T.zeros(max_size, action_dim, device=DEVICE)
+        self.next_states = T.zeros(max_size, state_dim, device=DEVICE)
+        self.rewards = T.zeros(max_size, 1, device=DEVICE)
+        self.dones = T.zeros(max_size, 1, device=DEVICE)
 
-        # params
-        self.memory_size = memory_size
-        self.state_dim = state_dim
-        self.action_dim = action_dim
-        self.pos = 0
-        self.full = False
 
-        self.states = T.zeros(self.memory_size, self.state_dim).to(DEVICE)
-        self.actions = T.zeros(self.memory_size, self.action_dim).to(DEVICE)
-        self.n_states = T.zeros(self.memory_size, self.state_dim).to(DEVICE)
-        self.rewards = T.zeros(self.memory_size, 1).to(DEVICE)
-        self.dones = T.zeros(self.memory_size, 1).to(DEVICE)
+    def add(self, state, action, next_state, reward, done):
+        self.states[self.ptr] = FloatTensor(state)
+        self.actions[self.ptr] = FloatTensor(action)
+        self.next_states[self.ptr] = FloatTensor(next_state)
+        self.rewards[self.ptr] = FloatTensor([reward])
+        self.dones[self.ptr] = FloatTensor([done])
 
-    def size(self):
-        if self.full:
-            return self.memory_size
-        return self.pos
-    
-    def get_pos(self):
-        return self.pos
-    
-        # Expects tuples of (state, next_state, action, reward, done)
+        self.ptr = (self.ptr + 1) % self.max_size
+        self.size = min(self.size + 1, self.max_size)
 
-    def add(self, datum):
-
-        state, n_state, action, reward, done = datum
-
-        self.states[self.pos] = FloatTensor(state)
-        self.n_states[self.pos] = FloatTensor(n_state)
-        self.actions[self.pos] = FloatTensor(action)
-        self.rewards[self.pos] = FloatTensor([reward])
-        self.dones[self.pos] = FloatTensor([done])
-
-        self.pos += 1
-        if self.pos == self.memory_size:
-            self.full = True
-            self.pos = 0
 
     def sample(self, batch_size):
+        ind = np.random.randint(0, self.size, size=batch_size)
 
-        upper_bound = self.memory_size if self.full else self.pos
-        batch_inds = T.LongTensor(
-            np.random.randint(0, upper_bound, size=batch_size))
-        
-        return (self.states[batch_inds],
-                self.n_states[batch_inds],
-                self.actions[batch_inds],
-                self.rewards[batch_inds],
-                self.dones[batch_inds])
-    
-    def get_reward(self, start_pos, end_pos):
-
-        tmp = 0
-        if start_pos <= end_pos:
-            for i in range(start_pos, end_pos):
-                tmp += self.rewards[i]
-        else:
-            for i in range(start_pos, self.memory_size):
-                tmp += self.rewards[i]
-
-            for i in range(end_pos):
-                tmp += self.rewards[i]
-
-        return tmp
-    
-    def repeat(self, start_pos, end_pos):
-
-        if start_pos <= end_pos:
-            for i in range(start_pos, end_pos):
-
-                self.states[self.pos] = self.states[i].clone()
-                self.n_states[self.pos] = self.n_states[i].clone()
-                self.actions[self.pos] = self.rewards[i].clone()
-                self.rewards[self.pos] = self.rewards[i].clone()
-                self.dones[self.pos] = self.dones[i].clone()
-
-                self.pos += 1
-                if self.pos == self.memory_size:
-                    self.full = True
-                    self.pos = 0
-
-        else:
-            for i in range(start_pos, self.memory_size):
-
-                self.states[self.pos] = self.states[i].clone()
-                self.n_states[self.pos] = self.n_states[i].clone()
-                self.actions[self.pos] = self.actions[i].clone()
-                self.rewards[self.pos] = self.rewards[i].clone()
-                self.dones[self.pos] = self.dones[i].clone()
-            
-            self.pos += 1
-            if self.pos == self.memory_size:
-                self.full = True
-                self.pos = 0
-
-            for i in range(end_pos):
-                
-                self.states[self.pos] = self.states[i].clone()
-                self.n_states[self.pos] = self.actions[i].clone()
-                self.actions[self.pos] = self.actions[i].clone()
-                self.rewards[self.pos] = self.rewards[i].clone()
-                self.dones[self.pos] = self.dones[i].clone()
-
-            self.pos += 1
-            if self.pos == self.memory_size:
-                self.full = True
-                self.pos = 0
+        return (self.states[ind],
+                self.actions[ind],
+                self.next_states[ind],
+                self.rewards[ind],
+                self.dones[ind])
